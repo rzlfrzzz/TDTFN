@@ -2,7 +2,8 @@
 
 Bot Telegram untuk kirim notifikasi otomatis **H-24 jam** dan **H-15 menit**
 sebelum pengumuman The Fed (FOMC, dll), lengkap dengan narasi AI dari
-DeepSeek (opsional, ada fallback kalau API-nya down).
+DeepSeek (opsional, ada fallback kalau API-nya down). Sekarang juga ada
+**insight harian BTC** tiap penutupan NY market.
 
 ## 1. Sumber Data Jadwal
 
@@ -19,7 +20,30 @@ DeepSeek (opsional, ada fallback kalau API-nya down).
   federalreserve.gov sebelum event, karena jadwal kadang bisa berubah
   (meeting emergency, dll).
 
-## 2. Setup
+## 2. Fitur Insight BTC Harian
+
+Setiap hari jam **16:00 waktu New York** (penutupan bursa saham NY, otomatis
+menyesuaikan EDT/EST karena pakai timezone-aware scheduler), bot akan:
+
+1. Ambil data harga BTC dari CoinMarketCap.
+2. Minta DeepSeek bikin narasi insight singkat (harga, perubahan 24 jam/7
+   hari, konteks momentum) dalam Bahasa Indonesia.
+3. Broadcast ke subscriber yang sama dengan notifikasi Fed (jadi kalau
+   `/subscribe`, otomatis dapat notif Fed **dan** BTC).
+
+Bisa juga dicek kapan saja lewat command `/btc` (on-demand, tidak perlu
+subscribe).
+
+Sumber data: **CMC Pro API resmi** (`pro-api.coinmarketcap.com`), butuh API
+key gratis dari [coinmarketcap.com/api](https://coinmarketcap.com/api/)
+(tier Basic gratis, cukup untuk basic usage seperti ini — sekali fetch per
+hari + on-demand lewat `/btc`). Isi ke `COINMARKETCAP_API_KEY` di `.env`.
+
+Kalau `COINMARKETCAP_API_KEY` kosong / key-nya invalid / kena rate limit,
+bot **skip** notifikasi BTC hari itu saja (log warning muncul di console,
+tidak crash, tidak kirim data kosong/salah).
+
+## 3. Setup
 
 ```bash
 # 1. Install dependencies
@@ -32,17 +56,20 @@ Isi file `.env`:
 ```
 TELEGRAM_BOT_TOKEN=123456:ABC-token-dari-BotFather
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxx
+COINMARKETCAP_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 BROADCAST_CHAT_ID=
 ```
 
 - `TELEGRAM_BOT_TOKEN`: dapatkan dari **@BotFather** di Telegram (`/newbot`).
 - `DEEPSEEK_API_KEY`: API key DeepSeek yang sudah kamu punya.
+- `COINMARKETCAP_API_KEY`: API key dari [coinmarketcap.com/api](https://coinmarketcap.com/api/)
+  (daftar akun → dashboard → copy API key, tier Basic gratis sudah cukup).
 - `BROADCAST_CHAT_ID` (opsional): kalau mau notifikasi otomatis dibroadcast
   ke channel/group tertentu (bukan cuma yang /subscribe personal), isi
   dengan chat ID channel-nya (bot harus jadi admin di channel itu). Kosongkan
   kalau tidak perlu.
 
-## 3. Menjalankan
+## 4. Menjalankan
 
 ```bash
 python bot.py
@@ -51,15 +78,16 @@ python bot.py
 Bot akan langsung polling & scheduler jalan di background (cek tiap 60 detik
 apakah ada event yang jatuh tempo H-24 jam / H-15 menit).
 
-## 4. Command yang tersedia di Telegram
+## 5. Command yang tersedia di Telegram
 
 - `/start` – info bot
-- `/subscribe` – aktifkan notifikasi ke chat pribadi
+- `/subscribe` – aktifkan notifikasi ke chat pribadi (Fed + BTC harian)
 - `/unsubscribe` – matikan notifikasi
 - `/status` – cek status subscribe
 - `/next` – lihat event Fed terdekat
+- `/btc` – lihat insight BTC saat ini (on-demand, tidak perlu subscribe)
 
-## 5. Deploy 24/7
+## 6. Deploy 24/7
 
 Supaya notifikasi jalan terus-menerus, bot ini perlu jalan 24/7 di server,
 bukan cuma di laptop kamu. Opsi murah/gampang:
@@ -72,7 +100,7 @@ Kalau proses mati (restart server dll), tinggal `python bot.py` lagi —
 data subscriber & histori notifikasi aman tersimpan di `fedbot.db`
 (SQLite), jadi tidak akan kirim notifikasi dobel untuk event yang sama.
 
-## 6. Menambah event baru
+## 7. Menambah event baru
 
 Edit `events.py`, tambahkan dict baru ke list `FED_EVENTS`. Pastikan `id`
 unik dan `datetime_utc` dalam format ISO UTC (`YYYY-MM-DDTHH:MM:SS`).
@@ -80,4 +108,4 @@ unik dan `datetime_utc` dalam format ISO UTC (`YYYY-MM-DDTHH:MM:SS`).
 ## Catatan Keamanan
 
 - Jangan commit file `.env` ke git (masukkan ke `.gitignore`).
-- Jangan share `TELEGRAM_BOT_TOKEN` / `DEEPSEEK_API_KEY` ke siapa pun.
+- Jangan share `TELEGRAM_BOT_TOKEN` / `DEEPSEEK_API_KEY` / `COINMARKETCAP_API_KEY` ke siapa pun.

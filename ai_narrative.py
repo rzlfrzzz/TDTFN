@@ -61,3 +61,64 @@ def generate_narrative(event_name: str, note: str, stage_label: str) -> str:
     except (APIError, APITimeoutError, Exception) as e:
         print(f"[ai_narrative] DeepSeek API gagal, pakai fallback. Error: {e}")
         return _fallback_text(event_name, note, stage_label)
+
+
+# ---------------------------------------------------------------------------
+# BTC daily insight (penutupan NY market)
+# ---------------------------------------------------------------------------
+
+BTC_SYSTEM_PROMPT = (
+    "Kamu adalah asisten yang menulis insight harian singkat tentang harga "
+    "Bitcoin (BTC) untuk channel Telegram trader/investor, dikirim setiap "
+    "penutupan market NY. Gaya bahasa: santai tapi profesional, singkat, "
+    "jelas, pakai Bahasa Indonesia. Fokus pada: pergerakan harga hari ini, "
+    "konteks singkat (naik/turun/sideways, momentum, likuiditas), dan "
+    "reminder umum soal manajemen risiko. JANGAN memberi rekomendasi "
+    "trading/investasi spesifik (jangan bilang 'beli' atau 'jual', jangan "
+    "kasih target harga/price target), cukup edukasi & insight. Maksimal "
+    "5-6 kalimat."
+)
+
+
+def _btc_fallback_text(snapshot: dict) -> str:
+    arrow = "📈" if snapshot["change_24h"] >= 0 else "📉"
+    return (
+        f"{arrow} *BTC Update - Penutupan NY Market*\n\n"
+        f"Harga: ${snapshot['price']:,.2f}\n"
+        f"Perubahan 24 jam: {snapshot['change_24h']:+.2f}%\n"
+        f"Perubahan 7 hari: {snapshot['change_7d']:+.2f}%\n\n"
+        "Selalu gunakan manajemen risiko dan hindari FOMO mengikuti "
+        "pergerakan harga jangka pendek."
+    )
+
+
+def generate_btc_insight(snapshot: dict) -> str:
+    """
+    snapshot: dict hasil dari market_data.fetch_btc_snapshot()
+    """
+    user_prompt = (
+        "Buatkan insight harian BTC untuk channel Telegram berdasarkan data "
+        "berikut (waktu: penutupan NY market):\n"
+        f"- Harga saat ini: ${snapshot['price']:,.2f}\n"
+        f"- Perubahan 1 jam: {snapshot['change_1h']:+.2f}%\n"
+        f"- Perubahan 24 jam: {snapshot['change_24h']:+.2f}%\n"
+        f"- Perubahan 7 hari: {snapshot['change_7d']:+.2f}%\n"
+        f"- Market cap: ${snapshot['market_cap']:,.0f}\n"
+        f"- Volume 24 jam: ${snapshot['volume_24h']:,.0f}\n"
+    )
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": BTC_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=300,
+            temperature=0.7,
+            timeout=15,
+        )
+        text = response.choices[0].message.content.strip()
+        return text if text else _btc_fallback_text(snapshot)
+    except (APIError, APITimeoutError, Exception) as e:
+        print(f"[ai_narrative] DeepSeek API gagal (BTC insight), pakai fallback. Error: {e}")
+        return _btc_fallback_text(snapshot)

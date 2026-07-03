@@ -5,10 +5,12 @@ ditulis langsung di kode (aman kalau mau push ke GitHub misalnya).
 Cara set (Linux/Mac):
     export TELEGRAM_BOT_TOKEN="123456:ABC-your-token"
     export DEEPSEEK_API_KEY="sk-xxxxxxxx"
+    export COINMARKETCAP_API_KEY="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
 Cara set (Windows PowerShell):
     $env:TELEGRAM_BOT_TOKEN="123456:ABC-your-token"
     $env:DEEPSEEK_API_KEY="sk-xxxxxxxx"
+    $env:COINMARKETCAP_API_KEY="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
 Atau paling gampang: pakai file .env (lihat README untuk instruksi).
 """
@@ -23,6 +25,7 @@ except ImportError:
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+COINMARKETCAP_API_KEY = os.getenv("COINMARKETCAP_API_KEY", "")
 
 # Channel/group id tempat notifikasi broadcast dikirim (opsional).
 # Kalau diisi, bot akan kirim ke channel ini SELAIN ke semua subscriber personal.
@@ -35,3 +38,5 @@ if not TELEGRAM_BOT_TOKEN:
     )
 if not DEEPSEEK_API_KEY:
     print("[config] WARNING: DEEPSEEK_API_KEY kosong, bot akan pakai narasi fallback saja.")
+if not COINMARKETCAP_API_KEY:
+    print("[config] WARNING: COINMARKETCAP_API_KEY kosong, insight BTC tidak akan berjalan.")

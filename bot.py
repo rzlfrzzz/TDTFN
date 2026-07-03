@@ -1,7 +1,9 @@
 import logging
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -11,9 +13,16 @@ from telegram.ext import (
 )
 
 import database as db
-from ai_narrative import generate_narrative
+import market_data
+from ai_narrative import generate_narrative, generate_btc_insight
 from config import TELEGRAM_BOT_TOKEN, BROADCAST_CHAT_ID
 from events import get_upcoming_events, get_event_dt
+
+# Jam penutupan NY market (bursa saham AS) = 16:00 ET. Pakai ZoneInfo supaya
+# otomatis handle DST (EDT/EST), tidak perlu hitung manual UTC offset.
+NY_CLOSE_HOUR = 16
+NY_CLOSE_MINUTE = 0
+NY_TZ = ZoneInfo("America/New_York")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -32,14 +41,16 @@ WINDOW_SECONDS = 90
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👋 Halo! Ini bot notifikasi jadwal pengumuman The Fed (FOMC & event "
-        "penting lainnya).\n\n"
+        "penting lainnya), plus insight harian BTC.\n\n"
         "Kamu akan dapat notifikasi otomatis:\n"
-        "• 24 jam sebelum pengumuman\n"
-        "• 15 menit sebelum pengumuman\n\n"
+        "• 24 jam sebelum pengumuman Fed\n"
+        "• 15 menit sebelum pengumuman Fed\n"
+        "• Insight BTC tiap penutupan NY market (16:00 ET)\n\n"
         "Perintah yang tersedia:\n"
         "/subscribe – aktifkan notifikasi\n"
         "/unsubscribe – matikan notifikasi\n"
-        "/next – lihat event terdekat\n"
+        "/next – lihat event Fed terdekat\n"
+        "/btc – lihat insight BTC saat ini\n"
         "/status – cek status subscribe kamu"
     )
     await update.message.reply_text(text)
@@ -84,6 +95,19 @@ async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def btc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Mengambil data BTC terbaru...")
+    snapshot = market_data.fetch_btc_snapshot()
+    if snapshot is None:
+        await update.message.reply_text(
+            "⚠️ Gagal ambil data BTC dari CoinMarketCap saat ini. Coba lagi "
+            "beberapa saat lagi."
+        )
+        return
+    text = generate_btc_insight(snapshot)
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
 # ---------- Scheduler job ----------
 
 async def check_and_notify(app: Application):
@@ -103,8 +127,10 @@ async def check_and_notify(app: Application):
             db.mark_sent(event["id"], "15m")
 
 
-async def broadcast_notification(app: Application, event: dict, stage: str, stage_label: str):
-    text = generate_narrative(event["name"], event.get("note", ""), stage_label)
+async def broadcast_message(app: Application, text: str) -> int:
+    """Kirim `text` ke semua subscriber + BROADCAST_CHAT_ID (kalau diset).
+    Dipakai bareng oleh notifikasi Fed dan insight BTC (subscriber sama).
+    Return jumlah chat yang jadi target (bukan jumlah yang sukses)."""
     recipients = db.get_all_subscribers()
     if BROADCAST_CHAT_ID:
         recipients = recipients + [BROADCAST_CHAT_ID]
@@ -115,7 +141,26 @@ async def broadcast_notification(app: Application, event: dict, stage: str, stag
         except Exception as e:
             logger.warning(f"Gagal kirim ke {chat_id}: {e}")
 
-    logger.info(f"Notifikasi '{stage}' untuk event '{event['id']}' terkirim ke {len(recipients)} chat.")
+    return len(recipients)
+
+
+async def broadcast_notification(app: Application, event: dict, stage: str, stage_label: str):
+    text = generate_narrative(event["name"], event.get("note", ""), stage_label)
+    count = await broadcast_message(app, text)
+    logger.info(f"Notifikasi '{stage}' untuk event '{event['id']}' terkirim ke {count} chat.")
+
+
+async def btc_daily_insight(app: Application):
+    """Job harian: insight BTC di penutupan NY market. Kalau fetch data
+    gagal, skip aja hari itu (jangan crash, jangan kirim data kosong)."""
+    snapshot = market_data.fetch_btc_snapshot()
+    if snapshot is None:
+        logger.warning("[btc_daily_insight] Gagal ambil data BTC, skip notifikasi hari ini.")
+        return
+
+    text = generate_btc_insight(snapshot)
+    count = await broadcast_message(app, text)
+    logger.info(f"Insight BTC harian terkirim ke {count} chat.")
 
 
 # ---------- Main ----------
@@ -130,12 +175,22 @@ def main():
     app.add_handler(CommandHandler("unsubscribe", unsubscribe_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("next", next_cmd))
+    app.add_handler(CommandHandler("btc", btc_cmd))
 
     scheduler = AsyncIOScheduler(timezone=timezone.utc)
     scheduler.add_job(
         check_and_notify,
         "interval",
         seconds=CHECK_INTERVAL_SECONDS,
+        args=[app],
+    )
+    # Insight BTC tiap hari jam 16:00 waktu New York. Pakai cron trigger
+    # dengan timezone America/New_York supaya otomatis nyesuain EDT/EST
+    # (tidak perlu hitung offset UTC manual, beda dengan jadwal FOMC di
+    # events.py yang tanggalnya fixed per rilis resmi Fed).
+    scheduler.add_job(
+        btc_daily_insight,
+        CronTrigger(hour=NY_CLOSE_HOUR, minute=NY_CLOSE_MINUTE, timezone=NY_TZ),
         args=[app],
     )
     scheduler.start()
