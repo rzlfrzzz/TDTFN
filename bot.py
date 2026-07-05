@@ -18,11 +18,11 @@ from ai_narrative import generate_narrative, generate_btc_insight
 from config import TELEGRAM_BOT_TOKEN, BROADCAST_CHAT_ID
 from events import get_upcoming_events, get_event_dt
 
-# Jam penutupan NY market (bursa saham AS) = 16:00 ET. Pakai ZoneInfo supaya
-# otomatis handle DST (EDT/EST), tidak perlu hitung manual UTC offset.
-NY_CLOSE_HOUR = 16
-NY_CLOSE_MINUTE = 0
-NY_TZ = ZoneInfo("America/New_York")
+# Jam insight BTC = 07:00 WIB (pagi Indonesia). Pakai ZoneInfo supaya
+# otomatis handle timezone dengan tepat.
+BTC_INSIGHT_HOUR = 7
+BTC_INSIGHT_MINUTE = 0
+WIB_TZ = ZoneInfo("Asia/Jakarta")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -184,13 +184,10 @@ def main():
         seconds=CHECK_INTERVAL_SECONDS,
         args=[app],
     )
-    # Insight BTC tiap hari jam 16:00 waktu New York. Pakai cron trigger
-    # dengan timezone America/New_York supaya otomatis nyesuain EDT/EST
-    # (tidak perlu hitung offset UTC manual, beda dengan jadwal FOMC di
-    # events.py yang tanggalnya fixed per rilis resmi Fed).
+    # Insight BTC tiap hari jam 07:00 WIB (pagi Indonesia).
     scheduler.add_job(
         btc_daily_insight,
-        CronTrigger(hour=NY_CLOSE_HOUR, minute=NY_CLOSE_MINUTE, timezone=NY_TZ),
+        CronTrigger(hour=BTC_INSIGHT_HOUR, minute=BTC_INSIGHT_MINUTE, timezone=WIB_TZ),
         args=[app],
     )
     scheduler.start()

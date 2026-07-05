@@ -22,17 +22,21 @@ DeepSeek (opsional, ada fallback kalau API-nya down). Sekarang juga ada
 
 ## 2. Fitur Insight BTC Harian
 
-Setiap hari jam **16:00 waktu New York** (penutupan bursa saham NY, otomatis
-menyesuaikan EDT/EST karena pakai timezone-aware scheduler), bot akan:
+Setiap hari jam **07:00 WIB** (pagi Indonesia), bot akan:
 
-1. Ambil data harga BTC dari CoinMarketCap.
-2. Minta DeepSeek bikin narasi insight singkat (harga, perubahan 24 jam/7
-   hari, konteks momentum) dalam Bahasa Indonesia.
-3. Broadcast ke subscriber yang sama dengan notifikasi Fed (jadi kalau
-   `/subscribe`, otomatis dapat notif Fed **dan** BTC).
+1. Ambil data BTC lengkap dari CoinMarketCap (harga, changes, volume, market cap, dominance, Fear & Greed Index, Altcoin Season Index).
+2. Format ke template terstruktur dengan semua metric utama.
+3. Minta DeepSeek bikin insight teknis singkat (analisis momentum, volume, dominance trend) dalam Bahasa Indonesia.
+4. Broadcast ke subscriber yang sama dengan notifikasi Fed (jadi kalau `/subscribe`, otomatis dapat notif Fed **dan** BTC).
 
-Bisa juga dicek kapan saja lewat command `/btc` (on-demand, tidak perlu
-subscribe).
+Format output mencakup:
+- 📊 Harga BTC & perubahan (24h, 7D, 30D)
+- Volume & Market Cap
+- 🌍 Data global crypto (total market cap, dominance BTC/ETH, Fear & Greed Index)
+- 🧠 Insight teknis dari AI
+- 📌 Kesimpulan (bias harian + area perhatian harga)
+
+Bisa juga dicek kapan saja lewat command `/btc` (on-demand, tidak perlu subscribe).
 
 Sumber data: **CMC Pro API resmi** (`pro-api.coinmarketcap.com`), butuh API
 key gratis dari [coinmarketcap.com/api](https://coinmarketcap.com/api/)
