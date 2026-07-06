@@ -45,7 +45,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Kamu akan dapat notifikasi otomatis:\n"
         "• 24 jam sebelum pengumuman Fed\n"
         "• 15 menit sebelum pengumuman Fed\n"
-        "• Insight BTC tiap penutupan NY market (16:00 ET)\n\n"
+        "• Insight BTC tiap pagi jam 07:00 WIB\n\n"
         "Perintah yang tersedia:\n"
         "/subscribe – aktifkan notifikasi\n"
         "/unsubscribe – matikan notifikasi\n"
@@ -97,7 +97,7 @@ async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def btc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Mengambil data BTC terbaru...")
-    snapshot = market_data.fetch_btc_snapshot()
+    snapshot = market_data.fetch_market_snapshot()
     if snapshot is None:
         await update.message.reply_text(
             "⚠️ Gagal ambil data BTC dari CoinMarketCap saat ini. Coba lagi "
@@ -151,9 +151,9 @@ async def broadcast_notification(app: Application, event: dict, stage: str, stag
 
 
 async def btc_daily_insight(app: Application):
-    """Job harian: insight BTC di penutupan NY market. Kalau fetch data
+    """Job harian: insight BTC jam 07:00 WIB. Kalau fetch data
     gagal, skip aja hari itu (jangan crash, jangan kirim data kosong)."""
-    snapshot = market_data.fetch_btc_snapshot()
+    snapshot = market_data.fetch_market_snapshot()
     if snapshot is None:
         logger.warning("[btc_daily_insight] Gagal ambil data BTC, skip notifikasi hari ini.")
         return
