@@ -1,3 +1,4 @@
+import html
 import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -6,6 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from telegram import Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,7 +16,7 @@ from telegram.ext import (
 
 import database as db
 import market_data
-from ai_narrative import generate_narrative, generate_btc_insight
+from ai_narrative import generate_narrative, generate_btc_insight, DIVIDER
 from config import TELEGRAM_BOT_TOKEN, BROADCAST_CHAT_ID
 from events import get_upcoming_events, get_event_dt
 
@@ -36,76 +38,102 @@ CHECK_INTERVAL_SECONDS = 60
 WINDOW_SECONDS = 90
 
 
+# ---------- Helpers ----------
+
+async def safe_reply(update: Update, text: str, parse_mode=ParseMode.HTML):
+    """Reply dengan HTML, fallback ke plain text kalau parsing gagal
+    (misalnya ada tag/simbol yang lolos escaping) supaya user tetap dapat
+    pesannya walau formatting-nya rusak, bukan silent fail."""
+    try:
+        await update.message.reply_text(text, parse_mode=parse_mode)
+    except BadRequest as e:
+        logger.warning(f"Gagal kirim dengan parse_mode {parse_mode}, fallback plain text: {e}")
+        plain = html.unescape(
+            text.replace("<b>", "").replace("</b>", "")
+            .replace("<i>", "").replace("</i>", "")
+            .replace("<pre>", "").replace("</pre>", "")
+        )
+        await update.message.reply_text(plain)
+
+
 # ---------- Command handlers ----------
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "👋 Halo! Ini bot notifikasi jadwal pengumuman The Fed (FOMC & event "
-        "penting lainnya), plus insight harian BTC.\n\n"
-        "Kamu akan dapat notifikasi otomatis:\n"
+        "👋 <b>Selamat datang!</b>\n"
+        "Bot notifikasi jadwal pengumuman The Fed (FOMC &amp; event penting "
+        "lainnya), plus insight harian BTC.\n"
+        f"{DIVIDER}\n"
+        "🔔 <b>Kamu akan dapat notifikasi otomatis:</b>\n"
         "• 24 jam sebelum pengumuman Fed\n"
         "• 15 menit sebelum pengumuman Fed\n"
         "• Insight BTC tiap pagi jam 07:00 WIB\n\n"
-        "Perintah yang tersedia:\n"
+        "🛠 <b>Perintah tersedia:</b>\n"
         "/subscribe – aktifkan notifikasi\n"
         "/unsubscribe – matikan notifikasi\n"
         "/next – lihat event Fed terdekat\n"
         "/btc – lihat insight BTC saat ini\n"
         "/status – cek status subscribe kamu"
     )
-    await update.message.reply_text(text)
+    await safe_reply(update, text)
 
 
 async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     db.add_subscriber(chat.id, chat.username)
-    await update.message.reply_text(
-        "✅ Kamu berhasil subscribe! Kamu akan dapat notifikasi H-24 jam dan "
-        "H-15 menit sebelum event Fed."
+    await safe_reply(
+        update,
+        "✅ <b>Berhasil subscribe!</b>\n"
+        "Kamu akan dapat notifikasi H-24 jam dan H-15 menit sebelum event Fed.",
     )
 
 
 async def unsubscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     db.remove_subscriber(chat.id)
-    await update.message.reply_text("❌ Kamu sudah unsubscribe dari notifikasi.")
+    await safe_reply(update, "❌ Kamu sudah <b>unsubscribe</b> dari notifikasi.")
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     subscribed = db.is_subscribed(chat.id)
-    await update.message.reply_text(
-        "Status kamu: " + ("✅ Subscribed" if subscribed else "❌ Belum subscribe (pakai /subscribe)")
-    )
+    status_line = "✅ <b>Subscribed</b>" if subscribed else "❌ <b>Belum subscribe</b> (pakai /subscribe)"
+    await safe_reply(update, f"Status kamu: {status_line}")
 
 
 async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upcoming = get_upcoming_events()
     if not upcoming:
-        await update.message.reply_text("Belum ada event terjadwal di data saat ini.")
+        await safe_reply(update, "Belum ada event terjadwal di data saat ini.")
         return
     event = upcoming[0]
     dt = get_event_dt(event)
     wib = dt.astimezone(timezone(timedelta(hours=7)))
-    await update.message.reply_text(
-        f"📅 Event terdekat: *{event['name']}*\n"
-        f"Waktu: {wib.strftime('%d %b %Y, %H:%M WIB')} ({dt.strftime('%H:%M UTC')})\n"
-        f"{event.get('note', '')}",
-        parse_mode=ParseMode.MARKDOWN,
+    note = html.escape(event.get("note", ""), quote=False)
+    name = html.escape(event["name"], quote=False)
+    text = (
+        "📅 <b>Event Fed Terdekat</b>\n"
+        f"{DIVIDER}\n"
+        f"<b>{name}</b>\n"
+        f"🗓 {wib.strftime('%d %b %Y, %H:%M WIB')} ({dt.strftime('%H:%M UTC')})\n\n"
+        f"{note}"
     )
+    await safe_reply(update, text)
 
 
 async def btc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Mengambil data BTC terbaru...")
+    await safe_reply(update, "⏳ Mengambil data BTC terbaru...")
     snapshot = market_data.fetch_market_snapshot()
     if snapshot is None:
-        await update.message.reply_text(
+        await safe_reply(
+            update,
             "⚠️ Gagal ambil data BTC dari CoinMarketCap saat ini. Coba lagi "
-            "beberapa saat lagi."
+            "beberapa saat lagi.",
         )
         return
-    text = generate_btc_insight(snapshot)
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    now_wib = datetime.now(timezone.utc).astimezone(WIB_TZ)
+    text = generate_btc_insight(snapshot, timestamp_label=now_wib.strftime("%d %b %Y • %H:%M WIB"))
+    await safe_reply(update, text)
 
 
 # ---------- Scheduler job ----------
@@ -137,7 +165,18 @@ async def broadcast_message(app: Application, text: str) -> int:
 
     for chat_id in recipients:
         try:
-            await app.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+            await app.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+        except BadRequest as e:
+            logger.warning(f"HTML gagal di-parse untuk {chat_id}, fallback plain text: {e}")
+            plain = html.unescape(
+                text.replace("<b>", "").replace("</b>", "")
+                .replace("<i>", "").replace("</i>", "")
+                .replace("<pre>", "").replace("</pre>", "")
+            )
+            try:
+                await app.bot.send_message(chat_id=chat_id, text=plain)
+            except Exception as e2:
+                logger.warning(f"Gagal kirim (fallback) ke {chat_id}: {e2}")
         except Exception as e:
             logger.warning(f"Gagal kirim ke {chat_id}: {e}")
 
@@ -158,7 +197,8 @@ async def btc_daily_insight(app: Application):
         logger.warning("[btc_daily_insight] Gagal ambil data BTC, skip notifikasi hari ini.")
         return
 
-    text = generate_btc_insight(snapshot)
+    now_wib = datetime.now(timezone.utc).astimezone(WIB_TZ)
+    text = generate_btc_insight(snapshot, timestamp_label=now_wib.strftime("%d %b %Y • %H:%M WIB"))
     count = await broadcast_message(app, text)
     logger.info(f"Insight BTC harian terkirim ke {count} chat.")
 

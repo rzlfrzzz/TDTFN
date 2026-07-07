@@ -2,6 +2,8 @@
 Ambil data market BTC + global crypto dari CoinMarketCap Pro API.
 """
 
+import time
+
 import requests
 
 from config import COINMARKETCAP_API_KEY
@@ -39,49 +41,83 @@ def _safe_int(value, default=0) -> int:
         return default
 
 
-def _get_json(url: str, params: dict | None = None) -> dict | None:
+RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
+MAX_RETRIES = 2  # total percobaan = 1 request awal + 2 retry
+RETRY_BACKOFF_SECONDS = 1.5
+
+
+def _get_json(url: str, params: dict | None = None, endpoint_label: str = "") -> dict | None:
     """
     Helper request ke CMC.
     Return payload JSON atau None kalau gagal.
+
+    Auto-retry (dengan backoff singkat) khusus untuk error transient
+    (429 rate limit, 5xx server error) supaya data tidak silently hilang
+    gara-gara hiccup sesaat. Error permanen (401/403/parse error) langsung
+    return None tanpa retry.
     """
+    label = endpoint_label or url
+
     if not COINMARKETCAP_API_KEY:
-        print("[market_data] COINMARKETCAP_API_KEY belum di-set.")
+        print(f"[market_data] COINMARKETCAP_API_KEY belum di-set ({label}).")
         return None
 
-    try:
-        resp = requests.get(
-            url,
-            params=params or {},
-            headers=HEADERS,
-            timeout=REQUEST_TIMEOUT,
-        )
+    last_error = None
 
-        if resp.status_code == 401:
-            print("[market_data] CMC API key tidak valid/expired (401).")
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            resp = requests.get(
+                url,
+                params=params or {},
+                headers=HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+
+            if resp.status_code == 401:
+                print(f"[market_data] CMC API key tidak valid/expired (401) - {label}.")
+                return None
+
+            if resp.status_code == 403:
+                print(f"[market_data] Akses endpoint CMC ditolak (403) - {label}. Cek plan API.")
+                return None
+
+            if resp.status_code in RETRYABLE_STATUS_CODES:
+                last_error = f"HTTP {resp.status_code}"
+                if attempt < MAX_RETRIES:
+                    print(
+                        f"[market_data] {last_error} di {label} (percobaan {attempt + 1}/"
+                        f"{MAX_RETRIES + 1}), retry dalam {RETRY_BACKOFF_SECONDS}s..."
+                    )
+                    time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+                    continue
+                print(f"[market_data] {last_error} di {label}, sudah habis retry.")
+                return None
+
+            resp.raise_for_status()
+
+            payload = resp.json()
+
+            status = payload.get("status", {})
+            if status.get("error_code") not in (None, 0):
+                print(f"[market_data] CMC error ({label}): {status.get('error_message')}")
+                return None
+
+            return payload
+
+        except Exception as e:
+            last_error = str(e)
+            if attempt < MAX_RETRIES:
+                print(
+                    f"[market_data] Gagal request CMC ({label}): {e} "
+                    f"(percobaan {attempt + 1}/{MAX_RETRIES + 1}), retry..."
+                )
+                time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+                continue
+            print(f"[market_data] Gagal request CMC ({label}) setelah retry: {e}")
             return None
 
-        if resp.status_code == 403:
-            print("[market_data] Akses endpoint CMC ditolak (403). Cek plan API.")
-            return None
-
-        if resp.status_code == 429:
-            print("[market_data] Kena rate limit CMC API (429).")
-            return None
-
-        resp.raise_for_status()
-
-        payload = resp.json()
-
-        status = payload.get("status", {})
-        if status.get("error_code") not in (None, 0):
-            print(f"[market_data] CMC error: {status.get('error_message')}")
-            return None
-
-        return payload
-
-    except Exception as e:
-        print(f"[market_data] Gagal request CMC: {e}")
-        return None
+    print(f"[market_data] Gagal ambil data dari {label}: {last_error}")
+    return None
 
 
 def fetch_btc_snapshot() -> dict | None:
@@ -97,7 +133,7 @@ def fetch_btc_snapshot() -> dict | None:
         "convert": "USD",
     }
 
-    payload = _get_json(QUOTE_URL, params=params)
+    payload = _get_json(QUOTE_URL, params=params, endpoint_label="BTC quote")
     if not payload:
         return None
 
@@ -151,7 +187,7 @@ def fetch_global_metrics() -> dict | None:
     Ambil data global crypto market:
     total market cap, total volume, BTC dominance, ETH dominance.
     """
-    payload = _get_json(GLOBAL_METRICS_URL, params={"convert": "USD"})
+    payload = _get_json(GLOBAL_METRICS_URL, params={"convert": "USD"}, endpoint_label="Global Metrics")
     if not payload:
         return None
 
@@ -178,7 +214,7 @@ def fetch_fear_greed() -> dict | None:
     """
     Ambil CMC Fear & Greed Index terbaru.
     """
-    payload = _get_json(FEAR_GREED_URL)
+    payload = _get_json(FEAR_GREED_URL, endpoint_label="Fear & Greed Index")
     if not payload:
         return None
 
@@ -200,7 +236,7 @@ def fetch_altcoin_season() -> dict | None:
     """
     Ambil Altcoin Season Index terbaru.
     """
-    payload = _get_json(ALTCOIN_SEASON_URL)
+    payload = _get_json(ALTCOIN_SEASON_URL, endpoint_label="Altcoin Season Index")
     if not payload:
         return None
 
@@ -225,21 +261,54 @@ def fetch_market_snapshot() -> dict | None:
     Gabungkan semua data market untuk dikirim ke AI / Telegram.
 
     Kalau BTC gagal, return None.
-    Kalau data tambahan gagal, tetap lanjut dengan data BTC.
+    Kalau data tambahan (global metrics / fear&greed / altcoin season) gagal,
+    tetap lanjut dengan data BTC saja, TAPI key yang gagal itu diisi None
+    (bukan dihilangkan / bukan 0) supaya lapisan tampilan (ai_narrative.py)
+    bisa membedakan "nilainya memang 0" vs "datanya gagal diambil", dan
+    menampilkan status tersebut secara jujur (mis. "N/A") bukan angka palsu.
+
+    "data_warnings": list label section yang gagal diambil, dipakai untuk
+    kasih catatan singkat di pesan kalau ada data yang tidak lengkap.
     """
     btc = fetch_btc_snapshot()
     if not btc:
         return None
 
-    global_metrics = fetch_global_metrics() or {}
-    fear_greed = fetch_fear_greed() or {}
-    altcoin_season = fetch_altcoin_season() or {}
+    warnings: list[str] = []
+
+    global_metrics = fetch_global_metrics()
+    if global_metrics is None:
+        warnings.append("Data Global Market")
+        global_metrics = {
+            "total_market_cap": None,
+            "total_volume_24h": None,
+            "btc_dominance": None,
+            "eth_dominance": None,
+        }
+
+    fear_greed = fetch_fear_greed()
+    if fear_greed is None:
+        warnings.append("Fear & Greed Index")
+        fear_greed = {
+            "fear_greed_value": None,
+            "fear_greed_classification": None,
+            "fear_greed_update_time": None,
+        }
+
+    altcoin_season = fetch_altcoin_season()
+    if altcoin_season is None:
+        warnings.append("Altcoin Season Index")
+        altcoin_season = {
+            "altcoin_season_index": None,
+            "altcoin_marketcap": None,
+        }
 
     snapshot = {
         **btc,
         **global_metrics,
         **fear_greed,
         **altcoin_season,
+        "data_warnings": warnings,
     }
 
     return snapshot
