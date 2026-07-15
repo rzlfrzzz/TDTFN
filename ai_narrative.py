@@ -37,39 +37,100 @@ DIVIDER = "━━━━━━━━━━━━━━━━━━━━"
 
 SYSTEM_PROMPT = (
     "Kamu adalah asisten yang menulis peringatan singkat untuk trader/investor "
-    "di channel Telegram tentang event Federal Reserve (The Fed) yang akan "
-    "datang. Gaya bahasa: santai tapi profesional, singkat, jelas, pakai "
-    "Bahasa Indonesia. Fokus pada: apa eventnya, kenapa penting, dan "
-    "reminder untuk hati-hati/manage risiko karena potensi volatilitas "
-    "tinggi. JANGAN memberi rekomendasi trading/investasi spesifik "
-    "(jangan bilang 'beli' atau 'jual'), cukup edukasi risiko. Maksimal "
-    "5-6 kalimat. PENTING: tulis dalam teks polos saja, JANGAN pakai "
-    "simbol markdown seperti **, __, ##, atau format list bernomor."
+    "di channel Telegram tentang event ekonomi (Federal Reserve, rilis data "
+    "ekonomi AS seperti CPI/NFP/PPI/GDP, dll) yang akan datang. Gaya bahasa: "
+    "santai tapi profesional, singkat, jelas, pakai Bahasa Indonesia, terasa "
+    "rapi & enak dibaca tapi TIDAK norak/berlebihan (hindari huruf kapital "
+    "semua, tanda seru bertumpuk, atau emoji berlebihan). "
+    "Fokus pada 3 hal secara ringkas: "
+    "(1) apa event ini & apa yang diukur/diumumkan, "
+    "(2) kenapa event ini bisa berdampak ke Dolar AS (USD) - jelaskan "
+    "mekanismenya secara singkat berdasarkan konteks dampak yang diberikan "
+    "(mis. kaitannya dengan ekspektasi kebijakan suku bunga The Fed), "
+    "(3) reminder singkat untuk waspada terhadap potensi volatilitas & "
+    "manajemen risiko. JANGAN memberi rekomendasi trading/investasi spesifik "
+    "(jangan bilang 'beli' atau 'jual', jangan kasih target harga). Maksimal "
+    "5-6 kalimat. PENTING: tulis dalam teks polos saja, JANGAN pakai simbol "
+    "markdown seperti **, __, ##, atau format list bernomor/bullet."
 )
 
+IMPACT_BADGES = {
+    "High": "🔴 Tinggi",
+    "Medium": "🟡 Sedang",
+    "Low": "🟢 Rendah",
+}
 
-def _fallback_text(event_name: str, note: str, stage_label: str) -> str:
-    return (
-        f"⚠️ <b>Reminder: {_esc(event_name)}</b>\n"
-        f"Akan berlangsung <b>{_esc(stage_label)}</b>\n"
-        f"{DIVIDER}\n\n"
-        f"{_esc(note)}\n\n"
+IMPACT_LABELS_ID = {
+    "High": "Tinggi",
+    "Medium": "Sedang",
+    "Low": "Rendah",
+}
+
+
+def _impact_line(impact: str | None) -> str:
+    """Format baris badge dampak, contoh: '🔴 Dampak ke USD: Tinggi'."""
+    if not impact:
+        return ""
+    emoji = IMPACT_BADGES.get(impact, "⚪️").split(" ")[0]
+    label = IMPACT_LABELS_ID.get(impact, impact)
+    return f"{emoji} Dampak ke USD: <b>{label}</b>"
+
+
+def _fallback_text(event: dict, stage_label: str) -> str:
+    event_name = event.get("name", "")
+    note = event.get("note") or event.get("impact_reason", "")
+    impact = event.get("impact")
+    source = event.get("source", "")
+
+    lines = [
+        f"⚠️ <b>{_esc(event_name)}</b>",
+        f"⏰ Akan berlangsung <b>{_esc(stage_label)}</b>",
+    ]
+    if impact:
+        lines.append(_impact_line(impact))
+    lines.append(DIVIDER)
+    lines.append("")
+    lines.append(_esc(note))
+    lines.append("")
+    lines.append(
         "📌 Volatilitas market berpotensi tinggi di sekitar waktu ini. "
         "Selalu gunakan manajemen risiko (stop loss, position sizing) dan "
         "hindari over-leverage menjelang &amp; saat pengumuman."
     )
+    if source:
+        lines.append("")
+        lines.append(f"<i>Sumber: {_esc(source)}</i>")
+    return "\n".join(lines)
 
 
-def generate_narrative(event_name: str, note: str, stage_label: str) -> str:
+def generate_narrative(event: dict, stage_label: str) -> str:
     """
+    Generate pesan notifikasi H-24 jam / H-15 menit untuk sebuah event.
+
+    event: dict dengan minimal key "name". Key opsional yang dimanfaatkan
+        kalau ada: "note", "impact" ("High"/"Medium"/"Low"), "impact_reason",
+        "source".
     stage_label contoh: "24 jam lagi" atau "15 menit lagi"
     """
-    user_prompt = (
-        f"Buatkan pesan peringatan untuk channel Telegram tentang event berikut:\n"
-        f"- Nama event: {event_name}\n"
-        f"- Waktu tersisa: {stage_label}\n"
-        f"- Keterangan tambahan: {note}\n"
-    )
+    event_name = event.get("name", "")
+    note = event.get("note") or event.get("impact_reason", "")
+    impact = event.get("impact")
+    impact_reason = event.get("impact_reason", "")
+    source = event.get("source", "")
+
+    prompt_lines = [
+        "Buatkan pesan peringatan untuk channel Telegram tentang event berikut:",
+        f"- Nama event: {event_name}",
+        f"- Waktu tersisa: {stage_label}",
+    ]
+    if impact:
+        prompt_lines.append(f"- Level dampak ke USD: {impact}")
+    if impact_reason:
+        prompt_lines.append(f"- Konteks/alasan dampak ke USD: {impact_reason}")
+    if note and note != impact_reason:
+        prompt_lines.append(f"- Keterangan tambahan: {note}")
+    user_prompt = "\n".join(prompt_lines)
+
     try:
         response = client.chat.completions.create(
             model="deepseek-chat",
@@ -77,22 +138,32 @@ def generate_narrative(event_name: str, note: str, stage_label: str) -> str:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=300,
+            max_tokens=350,
             temperature=0.7,
             timeout=15,
         )
         text = response.choices[0].message.content.strip()
         if not text:
-            return _fallback_text(event_name, note, stage_label)
+            return _fallback_text(event, stage_label)
+
+        header_lines = [
+            f"⚠️ <b>{_esc(event_name)}</b>",
+            f"⏰ Akan berlangsung <b>{_esc(stage_label)}</b>",
+        ]
+        if impact:
+            header_lines.append(_impact_line(impact))
+
+        footer = f"\n\n<i>Sumber: {_esc(source)}</i>" if source else ""
+
         return (
-            f"⚠️ <b>Reminder: {_esc(event_name)}</b>\n"
-            f"Akan berlangsung <b>{_esc(stage_label)}</b>\n"
+            f"{chr(10).join(header_lines)}\n"
             f"{DIVIDER}\n\n"
             f"{_esc(text)}"
+            f"{footer}"
         )
     except (APIError, APITimeoutError, Exception) as e:
         print(f"[ai_narrative] DeepSeek API gagal, pakai fallback. Error: {e}")
-        return _fallback_text(event_name, note, stage_label)
+        return _fallback_text(event, stage_label)
 
 
 # ---------------------------------------------------------------------------
