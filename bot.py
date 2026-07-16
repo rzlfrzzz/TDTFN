@@ -299,16 +299,50 @@ async def refresh_economic_calendar(app: Application = None):
 
 async def btc_daily_insight(app: Application):
     """Job harian: insight BTC jam 07:00 WIB. Kalau fetch data
-    gagal, skip aja hari itu (jangan crash, jangan kirim data kosong)."""
+    gagal, skip aja hari itu (jangan crash, jangan kirim data kosong).
+
+    Supaya insight tidak monoton, job ini juga mengumpulkan konteks
+    tambahan sebelum generate narasi:
+    - Snapshot BTC kemarin (dari cache SQLite) -> perbandingan hari ini vs kemarin.
+    - Event ekonomi AS yang rilis dalam 36 jam ke depan -> disinggung kalau relevan.
+    Top gainers/losers sudah otomatis ikut di dalam `snapshot` itu sendiri
+    (lihat market_data.fetch_market_snapshot).
+    """
     snapshot = market_data.fetch_market_snapshot()
     if snapshot is None:
         logger.warning("[btc_daily_insight] Gagal ambil data BTC, skip notifikasi hari ini.")
         return
 
     now_wib = datetime.now(timezone.utc).astimezone(WIB_TZ)
-    text = generate_btc_insight(snapshot, timestamp_label=now_wib.strftime("%d %b %Y • %H:%M WIB"))
+    today_str = now_wib.strftime("%Y-%m-%d")
+
+    try:
+        previous_snapshot = db.get_btc_snapshot_before(today_str)
+    except Exception as e:
+        logger.warning(f"[btc_daily_insight] Gagal ambil snapshot kemarin dari cache: {e}")
+        previous_snapshot = None
+
+    now_utc = datetime.now(timezone.utc)
+    upcoming_events = [
+        e for e in get_upcoming_events(now=now_utc)
+        if get_event_dt(e) <= now_utc + timedelta(hours=36)
+    ]
+
+    text = generate_btc_insight(
+        snapshot,
+        timestamp_label=now_wib.strftime("%d %b %Y • %H:%M WIB"),
+        previous_snapshot=previous_snapshot,
+        upcoming_events=upcoming_events,
+    )
     count = await broadcast_message(app, text)
     logger.info(f"Insight BTC harian terkirim ke {count} chat.")
+
+    try:
+        db.upsert_btc_snapshot(today_str, snapshot)
+        cutoff = (now_wib - timedelta(days=30)).strftime("%Y-%m-%d")
+        db.prune_old_btc_snapshots(cutoff)
+    except Exception as e:
+        logger.warning(f"[btc_daily_insight] Gagal simpan snapshot hari ini ke cache: {e}")
 
 
 # ---------- Main ----------

@@ -14,6 +14,14 @@ QUOTE_URL = f"{BASE_URL}/v1/cryptocurrency/quotes/latest"
 GLOBAL_METRICS_URL = f"{BASE_URL}/v1/global-metrics/quotes/latest"
 FEAR_GREED_URL = f"{BASE_URL}/v3/fear-and-greed/latest"
 ALTCOIN_SEASON_URL = f"{BASE_URL}/v1/altcoin-season-index/latest"
+LISTINGS_URL = f"{BASE_URL}/v1/cryptocurrency/listings/latest"
+
+# Stablecoin diexclude dari top gainers/losers karena pergerakan harganya
+# (biasanya < 1%) cuma noise, bukan sinyal market yang relevan.
+STABLECOIN_SYMBOLS = {
+    "USDT", "USDC", "DAI", "TUSD", "BUSD", "FDUSD", "USDE",
+    "PYUSD", "USDP", "GUSD", "USDD", "FRAX", "USD1",
+}
 
 HEADERS = {
     "X-CMC_PRO_API_KEY": COINMARKETCAP_API_KEY,
@@ -256,6 +264,56 @@ def fetch_altcoin_season() -> dict | None:
         return None
 
 
+def fetch_top_movers(limit: int = 5, universe: int = 200) -> dict | None:
+    """
+    Ambil top gainers & losers 24h dari `universe` koin teratas by market cap
+    (default top 200, biar tidak kena noise micro-cap/low-liquidity yang
+    gampang naik/turun ratusan persen tanpa makna). Stablecoin diexclude.
+
+    Return {"gainers": [...], "losers": [...]} - tiap item dict berisi
+    symbol/name/change_24h - atau None kalau request gagal.
+    """
+    params = {
+        "start": "1",
+        "limit": str(universe),
+        "convert": "USD",
+        "sort": "market_cap",
+        "sort_dir": "desc",
+    }
+    payload = _get_json(LISTINGS_URL, params=params, endpoint_label="Top Movers Listings")
+    if not payload:
+        return None
+
+    try:
+        coins = []
+        for item in payload.get("data", []):
+            symbol = str(item.get("symbol", "")).upper()
+            if symbol in STABLECOIN_SYMBOLS:
+                continue
+            quote = item.get("quote", {}).get("USD", {})
+            change = quote.get("percent_change_24h")
+            if change is None:
+                continue
+            coins.append({
+                "symbol": symbol,
+                "name": item.get("name", symbol),
+                "change_24h": _safe_float(change),
+            })
+
+        if not coins:
+            return {"gainers": [], "losers": []}
+
+        sorted_by_change = sorted(coins, key=lambda c: c["change_24h"], reverse=True)
+        gainers = sorted_by_change[:limit]
+        losers = list(reversed(sorted_by_change[-limit:]))
+
+        return {"gainers": gainers, "losers": losers}
+
+    except Exception as e:
+        print(f"[market_data] Gagal parse Top Movers: {e}")
+        return None
+
+
 def fetch_market_snapshot() -> dict | None:
     """
     Gabungkan semua data market untuk dikirim ke AI / Telegram.
@@ -303,11 +361,18 @@ def fetch_market_snapshot() -> dict | None:
             "altcoin_marketcap": None,
         }
 
+    top_movers = fetch_top_movers()
+    if top_movers is None:
+        warnings.append("Top Gainers/Losers")
+        top_movers = {"gainers": [], "losers": []}
+
     snapshot = {
         **btc,
         **global_metrics,
         **fear_greed,
         **altcoin_season,
+        "top_gainers": top_movers["gainers"],
+        "top_losers": top_movers["losers"],
         "data_warnings": warnings,
     }
 

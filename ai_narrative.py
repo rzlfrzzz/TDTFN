@@ -171,15 +171,27 @@ def generate_narrative(event: dict, stage_label: str) -> str:
 # ---------------------------------------------------------------------------
 
 BTC_INSIGHT_PROMPT = (
-    "Kamu adalah asisten trader berpengalaman. Buatkan analisis teknis singkat "
-    "(3-4 kalimat) tentang kondisi BTC hari ini berdasarkan data yang diberikan. "
-    "Gaya: santai tapi profesional, Bahasa Indonesia. Fokus: momentum (naik/turun/"
-    "sideways), volume relatif terhadap market cap, dominance trend. "
-    "JANGAN beri rekomendasi trading spesifik atau price target. "
-    "Akhir dengan 1 kalimat bias harian (bullish/netral/bearish) + range harga "
-    "perhatian (cukup range singkat, 2-3% dari harga saat ini). "
-    "PENTING: tulis dalam teks polos saja, JANGAN pakai simbol markdown "
-    "seperti **, __, ##, atau format list bernomor/bullet."
+    "Kamu adalah asisten trader berpengalaman yang menulis insight pagi harian "
+    "untuk channel Telegram. Gaya: santai tapi profesional, Bahasa Indonesia, "
+    "TIDAK norak/berlebihan (hindari huruf kapital semua, tanda seru bertumpuk, "
+    "emoji berlebihan). Tulis 4-6 kalimat.\n\n"
+    "Data yang diberikan bisa berisi beberapa bagian (tidak semua selalu ada, "
+    "sesuaikan narasi dengan apa yang tersedia hari itu):\n"
+    "1. Data BTC hari ini (harga, change, volume, dominance, fear&greed) - WAJIB dibahas.\n"
+    "2. Perbandingan dengan kemarin (kalau ada) - sebutkan TRENnya (menguat/melemah/"
+    "stabil dibanding kemarin), jangan cuma ulang angka mentah.\n"
+    "3. Top gainers/losers 24h dari coin-coin besar (kalau ada) - singgung singkat "
+    "kalau ada yang menonjol, ini indikasi rotasi minat pasar.\n"
+    "4. Event ekonomi AS yang akan rilis dalam waktu dekat (kalau ada) - kaitkan "
+    "sepintas kalau relevan (mis. pasar cenderung wait-and-see menjelang rilis besar).\n\n"
+    "PENTING supaya insight tidak monoton dari hari ke hari: JANGAN selalu pakai "
+    "struktur kalimat & urutan pembahasan yang sama persis setiap hari - variasikan "
+    "sudut pandang tergantung data mana yang paling menonjol/relevan hari itu. "
+    "JANGAN beri rekomendasi trading spesifik (jangan bilang 'beli'/'jual') atau "
+    "price target pasti. Akhir dengan 1 kalimat bias harian (bullish/netral/bearish) "
+    "+ range harga perhatian (2-3% dari harga saat ini). "
+    "PENTING: tulis dalam teks polos saja, JANGAN pakai simbol markdown seperti "
+    "**, __, ##, atau format list bernomor/bullet."
 )
 
 
@@ -241,8 +253,68 @@ def _pad_row(label: str, value: str, label_width: int = 16) -> str:
     return f"{label.ljust(label_width)}{value}"
 
 
-def _format_btc_metrics(snapshot: dict, timestamp_label: str = "") -> str:
-    """Format metric BTC menjadi template HTML yang rapi & premium."""
+def _delta_arrow(current, previous, higher_is_up: bool = True) -> str:
+    """Panah tren dibanding kemarin. Return string kosong kalau salah satu
+    data tidak tersedia (bukan dipaksa tampil 'N/A' biar tidak berisik)."""
+    if current is None or previous is None:
+        return ""
+    diff = current - previous
+    if abs(diff) < 1e-9:
+        return " →"
+    arrow = "▲" if diff > 0 else "▼"
+    if not higher_is_up:
+        arrow = "▼" if diff > 0 else "▲"
+    return f" {arrow}"
+
+
+def _format_top_movers(snapshot: dict) -> str:
+    """Format tabel top gainers & losers 24h, atau string kosong kalau
+    datanya tidak ada/gagal fetch (biar section-nya tidak muncul kosong)."""
+    gainers = snapshot.get("top_gainers") or []
+    losers = snapshot.get("top_losers") or []
+    if not gainers and not losers:
+        return ""
+
+    lines = ["", "🔥 <b>Top Movers 24h</b> <i>(top 200 by mcap)</i>"]
+    if gainers:
+        g_str = "  ".join(f"{c['symbol']} {_pct(c['change_24h'])}" for c in gainers[:5])
+        lines.append(f"📈 {_esc(g_str)}")
+    if losers:
+        l_str = "  ".join(f"{c['symbol']} {_pct(c['change_24h'])}" for c in losers[:5])
+        lines.append(f"📉 {_esc(l_str)}")
+    return "\n".join(lines)
+
+
+def _format_upcoming_events(upcoming_events: list[dict] | None) -> str:
+    """Format ringkasan event ekonomi yang akan rilis dalam waktu dekat,
+    atau string kosong kalau tidak ada event relevan."""
+    if not upcoming_events:
+        return ""
+
+    from events import get_event_dt  # local import biar tidak circular di module load
+
+    lines = ["", "📅 <b>Event Ekonomi Mendatang</b>"]
+    for event in upcoming_events[:3]:
+        dt = get_event_dt(event)
+        impact = event.get("impact")
+        badge = IMPACT_BADGES.get(impact, "⚪️").split(" ")[0] if impact else "⚪️"
+        name = _esc(event.get("name", ""))
+        lines.append(f"{badge} {name} — {dt.strftime('%d %b, %H:%M UTC')}")
+    return "\n".join(lines)
+
+
+def _format_btc_metrics(
+    snapshot: dict,
+    timestamp_label: str = "",
+    previous_snapshot: dict | None = None,
+    upcoming_events: list[dict] | None = None,
+) -> str:
+    """Format metric BTC menjadi template HTML yang rapi & premium.
+
+    previous_snapshot (opsional): snapshot kemarin, dipakai untuk kasih
+    panah tren (▲/▼) di sebelah fear&greed dan dominance supaya kelihatan
+    arah perubahannya, bukan cuma angka absolut.
+    """
     price = snapshot.get("price")
     change_24h = snapshot.get("change_24h")
     change_7d = snapshot.get("change_7d")
@@ -257,11 +329,16 @@ def _format_btc_metrics(snapshot: dict, timestamp_label: str = "") -> str:
     altcoin_index = snapshot.get("altcoin_season_index")
     warnings = snapshot.get("data_warnings") or []
 
+    prev = previous_snapshot or {}
+    price_arrow = _delta_arrow(price, prev.get("price"))
+    fg_arrow = _delta_arrow(fear_greed, prev.get("fear_greed_value"))
+    dom_arrow = _delta_arrow(btc_dominance, prev.get("btc_dominance"))
+
     price_str = f"${price:,.0f}" if price is not None else "N/A"
 
     btc_table = (
         "<pre>"
-        + _pad_row("BTC", price_str) + "\n"
+        + _pad_row("BTC", price_str + price_arrow) + "\n"
         + _pad_row("24H", _pct(change_24h)) + "\n"
         + _pad_row("7D", _pct(change_7d)) + "\n"
         + _pad_row("30D", _pct(change_30d)) + "\n"
@@ -274,7 +351,7 @@ def _format_btc_metrics(snapshot: dict, timestamp_label: str = "") -> str:
         "<pre>"
         + _pad_row("Total MCap", format_number(total_market_cap)) + "\n"
         + _pad_row("Total Vol 24h", format_number(total_volume_24h)) + "\n"
-        + _pad_row("BTC Dominance", _num2(btc_dominance)) + "\n"
+        + _pad_row("BTC Dominance", _num2(btc_dominance) + dom_arrow) + "\n"
         + _pad_row("ETH Dominance", _num2(eth_dominance))
         + "</pre>"
     )
@@ -299,9 +376,17 @@ def _format_btc_metrics(snapshot: dict, timestamp_label: str = "") -> str:
         global_table,
         "",
         "🧭 <b>Sentimen Market</b>",
-        f"{fg_emoji} Fear &amp; Greed: <b>{fg_value_str}</b> ({_esc(fg_label)})",
+        f"{fg_emoji} Fear &amp; Greed: <b>{fg_value_str}{fg_arrow}</b> ({_esc(fg_label)})",
         f"{alt_emoji} Altcoin Season: <b>{alt_value_str}</b> ({_esc(alt_label)})",
     ]
+
+    movers_block = _format_top_movers(snapshot)
+    if movers_block:
+        sections.append(movers_block)
+
+    events_block = _format_upcoming_events(upcoming_events)
+    if events_block:
+        sections.append(events_block)
 
     if warnings:
         warn_list = ", ".join(_esc(w) for w in warnings)
@@ -330,17 +415,34 @@ def _btc_fallback_insight(snapshot: dict) -> str:
     )
 
 
-def generate_btc_insight(snapshot: dict, timestamp_label: str = "") -> str:
+def generate_btc_insight(
+    snapshot: dict,
+    timestamp_label: str = "",
+    previous_snapshot: dict | None = None,
+    upcoming_events: list[dict] | None = None,
+) -> str:
     """
     Format BTC insight dengan struktur:
-    1. Metrics (harga, changes, volume, dominance, fear & greed) - tabel rapi
-    2. AI-generated insight teknis
-    3. Kesimpulan (bias + support/resistance range)
+    1. Metrics (harga, changes, volume, dominance, fear & greed) - tabel rapi,
+       lengkap dengan panah tren vs kemarin kalau ada histori
+    2. Top gainers/losers 24h (kalau datanya ada)
+    3. Event ekonomi AS yang akan datang (kalau ada dalam waktu dekat)
+    4. AI-generated insight yang meracik semua konteks di atas jadi narasi
+    5. Kesimpulan (bias + support/resistance range)
 
     snapshot: dict hasil dari market_data.fetch_market_snapshot()
     timestamp_label: string waktu (WIB) untuk ditampilkan di header, opsional.
+    previous_snapshot: dict hasil database.get_btc_snapshot_before(), opsional -
+        kalau ada, dipakai untuk narasi "vs kemarin" (bukan cuma tampilan panah).
+    upcoming_events: list event dari events.get_upcoming_events(), sudah
+        difilter ke rentang waktu dekat (mis. 36 jam) oleh caller, opsional.
     """
-    metrics_text = _format_btc_metrics(snapshot, timestamp_label=timestamp_label)
+    metrics_text = _format_btc_metrics(
+        snapshot,
+        timestamp_label=timestamp_label,
+        previous_snapshot=previous_snapshot,
+        upcoming_events=upcoming_events,
+    )
 
     price = snapshot.get("price") or 0
     change_24h = snapshot.get("change_24h") or 0
@@ -353,18 +455,58 @@ def generate_btc_insight(snapshot: dict, timestamp_label: str = "") -> str:
     fg_text = f"{fear_greed} / 100" if fear_greed is not None else "tidak tersedia saat ini"
     dominance_text = f"{btc_dominance:.2f}%" if btc_dominance is not None else "tidak tersedia saat ini"
 
-    user_prompt = (
-        "Data BTC hari ini:\n"
-        f"- Harga: ${price:,.0f}\n"
-        f"- Change 24h: {change_24h:+.2f}%\n"
-        f"- Volume 24h: ${volume_24h:,.0f}\n"
-        f"- Market Cap: ${market_cap:,.0f}\n"
-        f"- Volume/Market Cap: {volume_to_mcap:.2f}%\n"
-        f"- BTC Dominance: {dominance_text}\n"
-        f"- Fear & Greed Index: {fg_text}\n\n"
-        "Berdasarkan data ini, buatkan insight singkat tentang kondisi teknis BTC. "
-        "Kesimpulan dengan bias harian + range support/resistance."
+    prompt_parts = [
+        "Data BTC hari ini:",
+        f"- Harga: ${price:,.0f}",
+        f"- Change 24h: {change_24h:+.2f}%",
+        f"- Volume 24h: ${volume_24h:,.0f}",
+        f"- Market Cap: ${market_cap:,.0f}",
+        f"- Volume/Market Cap: {volume_to_mcap:.2f}%",
+        f"- BTC Dominance: {dominance_text}",
+        f"- Fear & Greed Index: {fg_text}",
+    ]
+
+    if previous_snapshot:
+        prev_price = previous_snapshot.get("price")
+        prev_fg = previous_snapshot.get("fear_greed_value")
+        prev_dom = previous_snapshot.get("btc_dominance")
+        comp_lines = ["", "Perbandingan dengan kemarin:"]
+        if prev_price is not None:
+            price_change_pct = ((price - prev_price) / prev_price * 100) if prev_price else 0
+            comp_lines.append(f"- Harga kemarin: ${prev_price:,.0f} (selisih {price_change_pct:+.2f}%)")
+        if prev_fg is not None and fear_greed is not None:
+            comp_lines.append(f"- Fear & Greed kemarin: {prev_fg}/100 (sekarang {fear_greed}/100)")
+        if prev_dom is not None and btc_dominance is not None:
+            comp_lines.append(f"- BTC Dominance kemarin: {prev_dom:.2f}% (sekarang {btc_dominance:.2f}%)")
+        if len(comp_lines) > 2:
+            prompt_parts.extend(comp_lines)
+
+    gainers = snapshot.get("top_gainers") or []
+    losers = snapshot.get("top_losers") or []
+    if gainers or losers:
+        prompt_parts.append("")
+        prompt_parts.append("Top movers 24h (dari top 200 coin by market cap):")
+        if gainers:
+            g_str = ", ".join(f"{c['symbol']} {c['change_24h']:+.1f}%" for c in gainers[:5])
+            prompt_parts.append(f"- Top gainers: {g_str}")
+        if losers:
+            l_str = ", ".join(f"{c['symbol']} {c['change_24h']:+.1f}%" for c in losers[:5])
+            prompt_parts.append(f"- Top losers: {l_str}")
+
+    if upcoming_events:
+        prompt_parts.append("")
+        prompt_parts.append("Event ekonomi AS yang akan rilis dalam waktu dekat:")
+        for event in upcoming_events[:3]:
+            name = event.get("name", "")
+            impact = event.get("impact", "")
+            prompt_parts.append(f"- {name} (dampak ke USD: {impact})")
+
+    prompt_parts.append("")
+    prompt_parts.append(
+        "Berdasarkan semua data di atas, buatkan insight singkat tentang kondisi "
+        "BTC hari ini. Kesimpulan dengan bias harian + range support/resistance."
     )
+    user_prompt = "\n".join(prompt_parts)
 
     used_fallback = False
     try:
