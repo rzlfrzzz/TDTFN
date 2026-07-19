@@ -1,20 +1,31 @@
 """
-Ambil jadwal economic calendar dari 3 sumber:
+Ambil jadwal economic calendar dari beberapa sumber:
+
+0. **ForexFactory** - via feed JSON tidak resmi mereka
+   (https://nfs.faireconomy.media/ff_calendar_thisweek.json &
+   .../ff_calendar_nextweek.json). Ini SUMBER UTAMA sekarang (dipakai duluan
+   di get_combined_calendar_events) karena BLS ICS (lihat poin 1) mulai
+   sering di-block Akamai (403) dari IP server/VPS, jadi tidak reliable lagi
+   buat dipakai bot yang jalan otomatis. Feed FF ini tidak didokumentasikan
+   resmi & bisa berubah/mati sewaktu-waktu tanpa pemberitahuan (dipakai luas
+   oleh komunitas bot trading, tapi bukan API resmi ForexFactory), jadi kalau
+   suatu saat gagal terus-menerus, cek dulu apakah URL/format-nya berubah.
+   Meng-cover hampir semua event penting AS sekaligus (CPI, NFP, PPI, GDP,
+   ISM PMI, Retail Sales, dll) plus sudah ada field impact bawaan dari
+   mereka, jadi cukup 1 sumber buat gantiin BLS + Trading Economics.
 
 1. **BLS (Bureau of Labor Statistics)** - via ICS calendar resmi mereka
-   (https://www.bls.gov/schedule/news_release/bls.ics). Ini feed publik
-   resmi yang dipakai orang untuk subscribe ke Outlook/Google Calendar,
-   jadi jauh lebih stabil & akurat dibanding scraping HTML halaman jadwal
-   mereka. Meng-cover rilis seperti CPI, Employment Situation (NFP), PPI,
-   JOLTS, Employment Cost Index, Real Earnings, Import/Export Price Index,
-   Productivity & Costs, dll. Semua jam di feed ini dalam Eastern Time
-   (otomatis di-handle oleh timezone block di dalam file ICS-nya).
+   (https://www.bls.gov/schedule/news_release/bls.ics). Dulunya sumber
+   utama untuk CPI/PPI/NFP dkk (lebih presisi & resmi), tapi sering
+   di-block Akamai (403) tergantung reputasi IP server yang request, jadi
+   sekarang cuma dipakai sebagai FALLBACK kalau ForexFactory gagal total.
+   Kalau ternyata di server kamu tidak diblokir, boleh saja dijadikan
+   sumber utama lagi.
 
 2. **Trading Economics** - via REST API (https://api.tradingeconomics.com).
-   Meng-cover event ekonomi AS yang lebih luas di luar rilis BLS: GDP,
-   Retail Sales, ISM Manufacturing/Services PMI, Consumer Confidence,
-   Housing Starts, Durable Goods, PCE, dll. Field "Importance" dari TE
-   (0/1/2 = Low/Medium/High) dipakai sebagai salah satu sinyal dampak.
+   Sama seperti BLS, sekarang jadi fallback (dipanggil kalau ForexFactory
+   gagal). Field "Importance" dari TE (0/1/2 = Low/Medium/High) dipakai
+   sebagai salah satu sinyal dampak.
    ⚠️ Kalau tidak diisi API key sendiri (TRADING_ECONOMICS_API_KEY di .env),
    bot pakai key demo publik "guest:guest" yang HANYA mengembalikan data
    sample/terbatas (bukan kalender penuh & real-time). Untuk pemakaian
@@ -28,7 +39,7 @@ Ambil jadwal economic calendar dari 3 sumber:
    dipakai daftar manual di events.py (lebih stabil, sesuai penjelasan di
    README).
 
-Event dari BLS & Trading Economics dinormalisasi ke format yang sama dengan
+Event dari semua sumber di atas dinormalisasi ke format yang sama dengan
 FED_EVENTS di events.py:
 {
     "id": str (unik & stabil antar refresh, dipakai buat cek "sudah dinotif"),
@@ -55,7 +66,25 @@ BLS_ICS_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
 TE_BASE_URL = "https://api.tradingeconomics.com"
 FED_RSS_URL = "https://www.federalreserve.gov/feeds/press_all.xml"
 
+# Feed JSON tidak resmi ForexFactory (dipakai luas oleh komunitas bot trading,
+# gratis, tanpa API key). "thisweek" & "nextweek" digabung supaya kira-kira
+# nutup lookahead ~14 hari (feed ini cuma nyediain per-minggu, tidak ada
+# parameter range custom).
+FF_THISWEEK_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+FF_NEXTWEEK_URL = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
+
 REQUEST_TIMEOUT = 15
+
+# Header standar buat semua request (beberapa provider/WAF suka nolak
+# request tanpa User-Agent yang kelihatan seperti browser).
+DEFAULT_REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/calendar,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 # ---------------------------------------------------------------------------
 # Klasifikasi dampak terhadap USD
@@ -163,7 +192,159 @@ def _stable_id(prefix: str, *parts: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. BLS - via ICS calendar resmi
+# 0. ForexFactory - via feed JSON tidak resmi (SUMBER UTAMA)
+# ---------------------------------------------------------------------------
+
+# Mapping impact dari ForexFactory ke label standar kita. FF kadang pakai
+# "Non-Economic" atau "Holiday" untuk event yang bukan data ekonomi (mis.
+# libur bursa) - itu di-skip, bukan dianggap "Low".
+_FF_IMPACT_MAP = {
+    "high": "High",
+    "medium": "Medium",
+    "med": "Medium",
+    "low": "Low",
+}
+_FF_SKIP_IMPACT = {"holiday", "non-economic", "none", ""}
+
+
+def _parse_ff_datetime(item: dict) -> datetime | None:
+    """Parse field tanggal/jam dari 1 item feed ForexFactory ke datetime UTC.
+
+    Field yang dipakai feed ini tidak didokumentasikan resmi & pernah
+    berubah-ubah di antara beberapa versi feed yang beredar, jadi di sini
+    dicoba beberapa kemungkinan field secara berurutan supaya tetap jalan
+    walau formatnya sedikit beda:
+    - "dateline": unix timestamp (int/str) - paling reliable kalau ada.
+    - "date": string ISO8601 dengan offset timezone, mis.
+      "2026-07-19T08:30:00-04:00".
+    """
+    dateline = item.get("dateline")
+    if dateline:
+        try:
+            return datetime.fromtimestamp(int(dateline), tz=timezone.utc)
+        except (TypeError, ValueError):
+            pass
+
+    date_str = item.get("date") or item.get("date_time") or item.get("datetime")
+    if date_str:
+        try:
+            dt = datetime.fromisoformat(str(date_str))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except ValueError:
+            pass
+
+    return None
+
+
+def _fetch_ff_week(url: str) -> list[dict]:
+    try:
+        resp = requests.get(url, timeout=REQUEST_TIMEOUT, headers=DEFAULT_REQUEST_HEADERS)
+        if resp.status_code != 200:
+            print(f"[economic_calendar] ForexFactory ({url}) balikin status {resp.status_code}, skip.")
+            return []
+        payload = resp.json()
+    except Exception as e:
+        print(f"[economic_calendar] Gagal ambil/parse ForexFactory ({url}): {e}")
+        return []
+
+    if not isinstance(payload, list):
+        print(f"[economic_calendar] Format response ForexFactory ({url}) tidak dikenali: {type(payload)}")
+        return []
+
+    return payload
+
+
+def fetch_forexfactory_calendar(lookahead_days: int = 14) -> list[dict]:
+    """Ambil economic calendar dari feed JSON tidak resmi ForexFactory.
+
+    Cuma ambil event currency USD (dampak ke USD, sesuai fokus bot ini).
+    Event yang sudah dicover manual di events.py (FOMC) di-skip supaya
+    tidak dobel notifikasi dengan daftar FOMC yang lebih detail catatannya.
+
+    Return [] kalau gagal (jangan bikin bot crash - fallback ke BLS/TE
+    tetap jalan lewat get_combined_calendar_events).
+    """
+    now = datetime.now(timezone.utc)
+    horizon = now + timedelta(days=lookahead_days)
+
+    raw_items = _fetch_ff_week(FF_THISWEEK_URL) + _fetch_ff_week(FF_NEXTWEEK_URL)
+    if not raw_items:
+        return []
+
+    events = []
+    seen_ids = set()
+    for item in raw_items:
+        try:
+            country = str(item.get("country", "")).strip().upper()
+            if country != "USD":
+                continue
+
+            name = str(item.get("title") or item.get("event") or "").strip()
+            if not name:
+                continue
+
+            if _is_fomc_owned(name):
+                continue
+
+            dt_utc = _parse_ff_datetime(item)
+            if dt_utc is None:
+                continue
+            if not (now <= dt_utc <= horizon):
+                continue
+
+            ff_impact_raw = str(item.get("impact", "")).strip().lower()
+            if ff_impact_raw in _FF_SKIP_IMPACT:
+                continue
+
+            if ff_impact_raw in _FF_IMPACT_MAP:
+                impact = _FF_IMPACT_MAP[ff_impact_raw]
+                _, reason = classify_impact(name)
+                # Kalau keyword kita tidak kenal event-nya, tetap pakai
+                # impact dari FF tapi reasoning default sesuai level itu.
+                if reason in (DEFAULT_LOW_REASON,) and impact != "Low":
+                    reason = {"High": DEFAULT_HIGH_REASON, "Medium": DEFAULT_MEDIUM_REASON}[impact]
+            else:
+                impact, reason = classify_impact(name)
+
+            forecast = str(item.get("forecast") or "").strip()
+            previous = str(item.get("previous") or "").strip()
+            extra_bits = []
+            if forecast:
+                extra_bits.append(f"Forecast: {forecast}")
+            if previous:
+                extra_bits.append(f"Previous: {previous}")
+            note = reason
+            if extra_bits:
+                note = f"{reason} ({' | '.join(extra_bits)})"
+
+            event_id = _stable_id("ff", name, dt_utc.strftime("%Y-%m-%dT%H:%M:%S"))
+            if event_id in seen_ids:
+                continue
+            seen_ids.add(event_id)
+
+            events.append({
+                "id": event_id,
+                "name": name,
+                "type": "ECON",
+                "datetime_utc": dt_utc.strftime("%Y-%m-%dT%H:%M:%S"),
+                "note": note,
+                "impact": impact,
+                "impact_reason": reason,
+                "source": "ForexFactory (unofficial feed)",
+                "country": "United States",
+                "currency": "USD",
+            })
+        except Exception as e:
+            print(f"[economic_calendar] Skip 1 event ForexFactory karena error parse: {e}")
+            continue
+
+    return events
+
+
+# ---------------------------------------------------------------------------
+# 1. BLS - via ICS calendar resmi (fallback)
 # ---------------------------------------------------------------------------
 
 def fetch_bls_calendar(lookahead_days: int = 14) -> list[dict]:
@@ -180,7 +361,13 @@ def fetch_bls_calendar(lookahead_days: int = 14) -> list[dict]:
         return []
 
     try:
-        resp = requests.get(BLS_ICS_URL, timeout=REQUEST_TIMEOUT)
+        resp = requests.get(BLS_ICS_URL, timeout=REQUEST_TIMEOUT, headers=DEFAULT_REQUEST_HEADERS)
+        if resp.status_code != 200:
+            print(
+                f"[economic_calendar] BLS ICS balikin status {resp.status_code} "
+                f"(bukan 200), skip. Body (200 char pertama): {resp.text[:200]!r}"
+            )
+            return []
         resp.raise_for_status()
     except Exception as e:
         print(f"[economic_calendar] Gagal ambil BLS ICS calendar: {e}")
@@ -404,9 +591,14 @@ def fetch_fed_press_releases(limit: int = 5) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def get_combined_calendar_events(lookahead_days: int = 14, min_impact: str = "Medium") -> list[dict]:
-    """Gabungkan hasil BLS + Trading Economics, filter berdasarkan level
-    dampak minimum (default Medium, supaya event dampak Low tidak membanjiri
-    notifikasi), dan kembalikan list event yang siap disimpan ke cache/DB.
+    """Ambil event dari ForexFactory (sumber utama - lebih reliable karena
+    BLS sering di-block Akamai tergantung IP server). Kalau ForexFactory
+    gagal total (feed down/berubah format), fallback ke BLS + Trading
+    Economics supaya tetap ada data walau lebih terbatas.
+
+    Filter berdasarkan level dampak minimum (default Medium, supaya event
+    dampak Low tidak membanjiri notifikasi), lalu kembalikan list event
+    yang siap disimpan ke cache/DB.
 
     Dipanggil secara periodik oleh scheduler di bot.py (bukan di setiap
     pengecekan notifikasi), supaya tidak membebani API pihak ketiga.
@@ -414,10 +606,14 @@ def get_combined_calendar_events(lookahead_days: int = 14, min_impact: str = "Me
     impact_rank = {"Low": 0, "Medium": 1, "High": 2}
     min_rank = impact_rank.get(min_impact, 1)
 
-    bls_events = fetch_bls_calendar(lookahead_days=lookahead_days)
-    te_events = fetch_trading_economics_calendar(lookahead_days=lookahead_days)
+    combined = fetch_forexfactory_calendar(lookahead_days=lookahead_days)
 
-    combined = bls_events + te_events
+    if not combined:
+        print("[economic_calendar] ForexFactory kosong/gagal, fallback ke BLS + Trading Economics.")
+        bls_events = fetch_bls_calendar(lookahead_days=lookahead_days)
+        te_events = fetch_trading_economics_calendar(lookahead_days=lookahead_days)
+        combined = bls_events + te_events
+
     filtered = [e for e in combined if impact_rank.get(e.get("impact", "Low"), 0) >= min_rank]
 
     filtered.sort(key=lambda e: e["datetime_utc"])
