@@ -3,6 +3,7 @@ Ambil data market BTC + global crypto dari CoinMarketCap Pro API.
 """
 
 import time
+from datetime import datetime, timezone
 
 import requests
 
@@ -12,9 +13,13 @@ BASE_URL = "https://pro-api.coinmarketcap.com"
 
 QUOTE_URL = f"{BASE_URL}/v1/cryptocurrency/quotes/latest"
 GLOBAL_METRICS_URL = f"{BASE_URL}/v1/global-metrics/quotes/latest"
-FEAR_GREED_URL = f"{BASE_URL}/v3/fear-and-greed/latest"
 ALTCOIN_SEASON_URL = f"{BASE_URL}/v1/altcoin-season-index/latest"
 LISTINGS_URL = f"{BASE_URL}/v1/cryptocurrency/listings/latest"
+
+# Fear & Greed Index CMC (/v3/fear-and-greed/latest) dibatasi untuk plan
+# berbayar di banyak free API key -> selalu 403. Dipindah ke alternative.me,
+# API publik gratis tanpa key dan tanpa makan quota CMC.
+FEAR_GREED_URL = "https://api.alternative.me/fng/"
 
 # Stablecoin diexclude dari top gainers/losers karena pergerakan harganya
 # (biasanya < 1%) cuma noise, bukan sinyal market yang relevan.
@@ -220,24 +225,69 @@ def fetch_global_metrics() -> dict | None:
 
 def fetch_fear_greed() -> dict | None:
     """
-    Ambil CMC Fear & Greed Index terbaru.
+    Ambil Fear & Greed Index dari alternative.me (public API, gratis,
+    tanpa API key, tidak makan rate limit/credit CMC).
+
+    Catatan: nilainya tidak identik dengan CMC Fear & Greed Index karena
+    sumber datanya berbeda, tapi skala 0-100 dan interpretasinya sama.
     """
-    payload = _get_json(FEAR_GREED_URL, endpoint_label="Fear & Greed Index")
-    if not payload:
-        return None
+    last_error = None
 
-    try:
-        data = payload["data"]
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            resp = requests.get(
+                FEAR_GREED_URL,
+                params={"limit": 1, "format": "json"},
+                timeout=REQUEST_TIMEOUT,
+            )
 
-        return {
-            "fear_greed_value": _safe_int(data.get("value")),
-            "fear_greed_classification": data.get("value_classification"),
-            "fear_greed_update_time": data.get("update_time"),
-        }
+            if resp.status_code in RETRYABLE_STATUS_CODES:
+                last_error = f"HTTP {resp.status_code}"
+                if attempt < MAX_RETRIES:
+                    print(
+                        f"[market_data] {last_error} di Fear & Greed Index (percobaan "
+                        f"{attempt + 1}/{MAX_RETRIES + 1}), retry dalam "
+                        f"{RETRY_BACKOFF_SECONDS}s..."
+                    )
+                    time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+                    continue
+                print(f"[market_data] Gagal ambil Fear & Greed setelah retry: {last_error}")
+                return None
 
-    except Exception as e:
-        print(f"[market_data] Gagal parse Fear & Greed: {e}")
-        return None
+            resp.raise_for_status()
+            payload = resp.json()
+            item = payload["data"][0]
+
+            update_time = None
+            timestamp = _safe_int(item.get("timestamp"))
+            if timestamp:
+                update_time = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+            return {
+                "fear_greed_value": _safe_int(item.get("value")),
+                "fear_greed_classification": item.get("value_classification"),
+                "fear_greed_update_time": update_time,
+            }
+
+        except requests.exceptions.RequestException as e:
+            last_error = str(e)
+            if attempt < MAX_RETRIES:
+                print(
+                    f"[market_data] Error koneksi Fear & Greed (percobaan "
+                    f"{attempt + 1}/{MAX_RETRIES + 1}): {e}, retry dalam "
+                    f"{RETRY_BACKOFF_SECONDS}s..."
+                )
+                time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+                continue
+            print(f"[market_data] Gagal ambil Fear & Greed setelah retry: {e}")
+            return None
+
+        except (KeyError, IndexError, ValueError) as e:
+            print(f"[market_data] Gagal parse Fear & Greed: {e}")
+            return None
+
+    print(f"[market_data] Gagal ambil Fear & Greed: {last_error}")
+    return None
 
 
 def fetch_altcoin_season() -> dict | None:
